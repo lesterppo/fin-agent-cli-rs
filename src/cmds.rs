@@ -54,27 +54,11 @@ pub fn cmd_q(y: &Yahoo, cache: Option<&Cache>, symbol: &str) -> FResult<String> 
 }
 
 // ---------------------------------------------------------------- h
-fn range_for_days(days: i64) -> &'static str {
-    if days <= 1 {
-        "1d"
-    } else if days <= 5 {
-        "5d"
-    } else if days <= 30 {
-        "1mo"
-    } else if days <= 90 {
-        "3mo"
-    } else if days <= 180 {
-        "6mo"
-    } else if days <= 365 {
-        "1y"
-    } else if days <= 730 {
-        "2y"
-    } else if days <= 1825 {
-        "5y"
-    } else {
-        "max"
-    }
-}
+// NOTE: Yahoo chart ranges are TRADING-day counts, not calendar days:
+// range=30d returns exactly 30 trading rows (verified 2026-10-26: MSFT
+// 20260914–20261023). The original passes period=f"{days}d" to yfinance,
+// which forwards it verbatim, so the faithful port does the same — no
+// bucketing, no cutoff filtering.
 
 pub fn cmd_h(y: &Yahoo, cache: Option<&Cache>, symbol: &str, days: i64) -> FResult<String> {
     let sym = norm(symbol)?;
@@ -122,10 +106,10 @@ fn fetch_tiingo_history(_y: &Yahoo, sym: &str, days: i64, key: &str) -> FResult<
         let num = |k: &str| row.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
         rows.push(vec![
             d,
-            format!("{:.2}", num("adjOpen")),
-            format!("{:.2}", num("adjHigh")),
-            format!("{:.2}", num("adjLow")),
-            format!("{:.2}", num("adjClose")),
+            crate::py_float(num("adjOpen"), 2),
+            crate::py_float(num("adjHigh"), 2),
+            crate::py_float(num("adjLow"), 2),
+            crate::py_float(num("adjClose"), 2),
             format!("{}", num("adjVolume") as i64),
         ]);
     }
@@ -133,14 +117,9 @@ fn fetch_tiingo_history(_y: &Yahoo, sym: &str, days: i64, key: &str) -> FResult<
 }
 
 pub fn fetch_yahoo_history(y: &Yahoo, sym: &str, days: i64) -> FResult<String> {
-    let r = y.chart(sym, range_for_days(days), "1d", "")?;
+    let range = format!("{days}d");
+    let r = y.chart(sym, &range, "1d", "")?;
     let ts = r.get("timestamp").and_then(|t| t.as_array()).cloned().unwrap_or_default();
-    // Anchor the window at the latest market day Yahoo returned, not at
-    // "now": Yahoo's own range buckets are anchored at the last trading
-    // day, so a weekend "now" must not drop Friday/Monday rows. This
-    // matches yfinance period="Nd" behaviour.
-    let latest = ts.iter().filter_map(|t| t.as_i64()).max().unwrap_or(now_unix());
-    let cutoff = latest - days * 86400;
     let quote = r
         .get("indicators")
         .and_then(|i| i.get("quote"))
@@ -165,16 +144,13 @@ pub fn fetch_yahoo_history(y: &Yahoo, sym: &str, days: i64) -> FResult<String> {
             Some(x) => x,
             None => continue,
         };
-        if t < cutoff {
-            continue;
-        }
         let f = |a: &[Option<f64>]| a.get(i).copied().flatten().unwrap_or(0.0);
         rows.push(vec![
             fmt_yyyymmdd(t),
-            format!("{:.2}", f(&opens)),
-            format!("{:.2}", f(&highs)),
-            format!("{:.2}", f(&lows)),
-            format!("{:.2}", f(&closes)),
+            crate::py_float(f(&opens), 2),
+            crate::py_float(f(&highs), 2),
+            crate::py_float(f(&lows), 2),
+            crate::py_float(f(&closes), 2),
             format!("{}", f(&vols) as i64),
         ]);
     }
@@ -350,12 +326,16 @@ pub fn fundamentals_json(sym: &str, qs: &Value, chart: &Value) -> Value {
     let fcf = qs_raw(qs, "financialData", "freeCashflow").or(fcf_stmt);
     obj_insert(&mut m, "fcf", json!(fmt_num(fcf)));
     obj_insert(&mut m, "b", json_round(qs_raw(qs, "summaryDetail", "beta").or_else(|| qs_raw(qs, "defaultKeyStatistics", "beta")), 2));
+    // dividendYield: Yahoo summaryDetail gives a FRACTION (0.0031) while
+    // yfinance info gives PERCENT (0.31). The original rounds its value
+    // directly, so to match its output the fraction is converted to
+    // percent first (verified: AAPL 0.31, MSFT 0.75 in the deep test).
     let dy_raw = qs_raw(qs, "summaryDetail", "dividendYield");
     obj_insert(
         &mut m,
         "dy",
         match dy_raw {
-            Some(v) if v > 0.0 => json_round(Some(v), 2),
+            Some(v) if v > 0.0 => json_round(Some(v * 100.0), 2),
             _ => Value::Null,
         },
     );
@@ -613,7 +593,7 @@ pub fn cmd_trend(y: &Yahoo, cache: Option<&Cache>, symbol: &str) -> FResult<Stri
             line.push_str(h);
         }
         clean.push_str(&line);
-        clean.push('\n');
+        clean.push_str("\r\n");
     }
     for (short, names) in MAP_QTREND {
         if !all.iter().any(|p| p.has(names)) {
@@ -624,7 +604,7 @@ pub fn cmd_trend(y: &Yahoo, cache: Option<&Cache>, symbol: &str) -> FResult<Stri
             row.push(fmt_num(p.val(names)));
         }
         clean.push_str(&row.join(","));
-        clean.push('\n');
+        clean.push_str("\r\n");
     }
     // OCF row from quarterly cashflow periods.
     let cf_periods: Vec<&StmtPeriod> = all
@@ -637,7 +617,7 @@ pub fn cmd_trend(y: &Yahoo, cache: Option<&Cache>, symbol: &str) -> FResult<Stri
             row.push(fmt_num(p.val(&["totalCashFromOperatingActivities"])));
         }
         clean.push_str(&row.join(","));
-        clean.push('\n');
+        clean.push_str("\r\n");
     }
     cache_set(cache, "yfinance", &sym, "trend", &clean);
     Ok(clean)
@@ -672,7 +652,7 @@ pub fn cmd_div(y: &Yahoo, cache: Option<&Cache>, symbol: &str) -> FResult<String
     items.sort_by_key(|(d, _)| *d);
     let rows: Vec<Vec<String>> = items
         .iter()
-        .map(|(d, a)| vec![fmt_yyyymmdd(*d), format!("{:.4}", a)])
+        .map(|(d, a)| vec![fmt_yyyymmdd(*d), crate::py_float(*a, 4)])
         .collect();
     let csv = to_csv(&["d", "v"], &rows);
     cache_set(cache, "yfinance", &sym, "dividends", &csv);
@@ -795,6 +775,8 @@ pub fn cmd_sec(cache: Option<&Cache>, symbol: &str) -> FResult<String> {
     let v = get_json(&client, &url, UA_SEC).map_err(|e| {
         if e.code == "E_RATE_LIMIT" {
             FinError::rate("SEC rate limit")
+        } else if e.code == "E_INV_SYM" {
+            FinError::inv(format!("SEC no data for: {sym}"))
         } else {
             FinError::fetch(e.message)
         }
