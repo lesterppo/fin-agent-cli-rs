@@ -124,6 +124,22 @@ pub fn round4(v: f64) -> f64 {
     (v * 10000.0).round() / 10000.0
 }
 
+/// Python-style float rendering: str(round(x, places)) — trailing zeros
+/// trimmed but at least one decimal kept ("346.0", "0.001", "3.08").
+/// Rust's {:.2} would print "346.00", which differs from the original CSV.
+pub fn py_float(x: f64, places: usize) -> String {
+    let f = 10f64.powi(places as i32);
+    let r = (x * f).round() / f;
+    let mut s = format!("{r:.places$}", places = places);
+    while s.contains('.') && s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.push('0');
+    }
+    s
+}
+
 // ---------------------------------------------------------------------------
 // Dates (no chrono dependency — civil-from-days algorithm)
 // ---------------------------------------------------------------------------
@@ -213,7 +229,7 @@ fn csv_line(cells: Vec<String>) -> String {
             }
         })
         .collect();
-    parts.join(",") + "\n"
+    parts.join(",") + "\r\n"
 }
 
 pub fn out_json(v: &Value) -> String {
@@ -389,7 +405,13 @@ impl Yahoo {
         let url = format!(
             "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={range}&interval={interval}&events={events}"
         );
-        let v = get_json(&self.client, &url, UA_YAHOO)?;
+        let v = get_json(&self.client, &url, UA_YAHOO).map_err(|e| {
+            if e.code == "E_INV_SYM" {
+                FinError::inv("Symbol not found or delisted")
+            } else {
+                e
+            }
+        })?;
         let result = v
             .get("chart")
             .and_then(|c| c.get("result"))
@@ -423,7 +445,13 @@ impl Yahoo {
         let url = format!(
             "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?period1={period1}&period2={period2}&interval={interval}&events={events}"
         );
-        let v = get_json(&self.client, &url, UA_YAHOO)?;
+        let v = get_json(&self.client, &url, UA_YAHOO).map_err(|e| {
+            if e.code == "E_INV_SYM" {
+                FinError::inv("Symbol not found or delisted")
+            } else {
+                e
+            }
+        })?;
         let result = v
             .get("chart")
             .and_then(|c| c.get("result"))
@@ -593,7 +621,7 @@ fn csv_line_pub(cells: Vec<String>) -> String {
             }
         })
         .collect();
-    parts.join(",") + "\n"
+    parts.join(",") + "\r\n"
 }
 
 pub fn json_num(v: Option<f64>) -> Value {
@@ -662,11 +690,22 @@ mod tests {
     }
 
     #[test]
+    fn py_float_matches_python_round_str() {
+        assert_eq!(py_float(346.0, 2), "346.0");
+        assert_eq!(py_float(340.78, 2), "340.78");
+        assert_eq!(py_float(339.5, 2), "339.5");
+        assert_eq!(py_float(0.001, 4), "0.001");
+        assert_eq!(py_float(0.08, 4), "0.08");
+        assert_eq!(py_float(3.08, 4), "3.08");
+        assert_eq!(py_float(0.000536, 4), "0.0005");
+    }
+
+    #[test]
     fn csv_minimal_quoting() {
         let s = to_csv(&["d", "insider"], &[vec!["20251020".to_string(), "SMITH, JOHN".to_string()]]);
-        assert_eq!(s, "d,insider\n20251020,\"SMITH, JOHN\"\n");
+        assert_eq!(s, "d,insider\r\n20251020,\"SMITH, JOHN\"\r\n");
         let s2 = to_csv(&["a"], &[vec!["plain".to_string()]]);
-        assert_eq!(s2, "a\nplain\n");
+        assert_eq!(s2, "a\r\nplain\r\n");
     }
 
     #[test]
@@ -713,7 +752,7 @@ mod tests {
             &[("r", &["totalRevenue"]), ("ni", &["netIncome"]), ("gp", &["grossProfit"])],
         );
         // gp is absent from all periods, so it is skipped (like the original).
-        assert_eq!(csv, "item,20250930,20240930\nr,416.16B,391.04B\nni,112.01B,93.74B\n");
+        assert_eq!(csv, "item,20250930,20240930\r\nr,416.16B,391.04B\r\nni,112.01B,93.74B\r\n");
     }
 
     #[test]
