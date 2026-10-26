@@ -1,0 +1,24 @@
+[package]
+name = "fin-rs"
+version = "0.1.0"
+edition = "2021"
+description = "fin-agent-cli in Rust: AI-native financial data CLI, single binary, no Python venv"
+license = "MIT"
+
+[[bin]]
+name = "fin-rs"
+path = "src/main.rs"
+
+[lib]
+name = "fin_rs"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "cookies", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[profile.release]
+opt-level = 3
