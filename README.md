@@ -96,18 +96,18 @@ reason stated.
 | `q` | Implemented | Chart meta (price, prev close, volume). The v7 quote endpoint now returns `Unauthorized` from datacenter IPs; chart meta is the working source. |
 | `h` | Implemented | Yahoo chart (Tiingo first when `TIINGO_API_KEY` is set, same waterfall). |
 | `m` | Implemented | FRED observations; `E_KEY_MISS` without a key, same as the original. |
-| `e` | Implemented | Next date from `calendarEvents`, 8Q history from `earningsHistory`, surprise% from `surprisePercent`. |
-| `f` | Partial | 45 of 49 keys populated from quoteSummary (`price`, `summaryDetail`, `defaultKeyStatistics`, `financialData`) plus computed `nd`/`ne`/`fy`. Missing computed keys only: `ic` (interest expense empty in 2026 histories), `rd` (R&D empty), `sb` (no SBC row), `by` (no diluted share counts). Quirk preserved from the original: `dy` rounds the fractional yield to 2dp, so AAPL shows `0.0`. |
-| `stmt` | Partial | Income statement returns revenue + net income reliably; cost-of-revenue / gross-profit / operating-income rows read 0 in 2026 quoteSummary data (Yahoo returns literal zeros, not missing rows). Balance-sheet history returns period dates with no rows; cash-flow returns net income only. The original's yfinance path shows the same degradation where it uses the same endpoint — see DEEP_TEST.md. |
+| `e` | Implemented | Next date from `calendarEvents`, history from `earningsHistory`, surprise% from `surprisePercent`. History depth is 4 quarters (all the module returns) vs the original's 8; the Python original timed out on this endpoint from this VM during the deep test while Rust returned in seconds. |
+| `f` | Partial | 45 of 49 keys populated from quoteSummary (`price`, `summaryDetail`, `defaultKeyStatistics`, `financialData`) plus computed `nd`/`ne`/`fy`. Missing computed keys only: `ic` (interest expense empty in 2026 histories), `rd` (R&D empty), `sb` (no SBC row), `by` (no diluted share counts). Two honest divergences: `nd`/`ne`/`fy` are computed from `financialData` totals (AAPL `nd 21.94B`, `fy 2.12`) while Python computes them from statements (`nd 62.72B`, `fy 1.95`); `ps` is `10.87` in Rust vs `null` in Python (Rust has more data here). `dy` is converted from Yahoo's fraction to percent to match Python exactly (AAPL `0.31`). |
+| `stmt` | Partial | Income statement returns revenue + net income reliably; cost-of-revenue / gross-profit / operating-income rows read 0 in 2026 quoteSummary data (Yahoo returns literal zeros, not missing rows). Balance-sheet history returns period dates with no rows; cash-flow returns net income only. Python's yfinance gets full statements from a different source (its `ws/fundamentals` endpoint returns `Not Found` from this VM, so this gap cannot currently be closed from quoteSummary) — see DEEP_TEST.md §4. |
 | `info` | Implemented | Name, sector, industry, country, employees, website, summary (240 chars). |
 | `cmp` | Implemented | Same metric columns as the original; a failed symbol yields an `ERR` row, as in the original. |
-| `trend` | Partial | Quarterly revenue + net income real; gross profit/operating income/EBITDA/EPS rows are absent or zero in 2026 quoteSummary quarterly data; OCF row only when quarterly cashflow exposes it. |
+| `trend` | Partial | Quarterly revenue + net income real (4 quarters); gross profit/operating income rows read 0 in 2026 quoteSummary quarterly data; EBITDA/EPS/OCF rows absent. Python returns 6 quarters with full rows (AAPL 20260630: `gp 54.77B, ebitda 39.02B, eps 2.02, ocf 34.37B`) from its richer statement source — same root cause as `stmt`, see DEEP_TEST.md §4. |
 | `div` | Implemented | Full dividend history via chart `period1=firstTradeDate` (AAPL: 92 dividends, 1987→2026), ascending, `d,v` CSV. Note: `range=max` truncates to ~169 points unauthenticated, so periods are used instead. Symbols with no dividends return `E_INV_SYM`, as in the original. |
 | `sec` | Implemented | EDGAR submissions, important forms only, max 20 rows. `www.sec.gov` rate-limits the ticker map from datacenter IPs, so a bundled fallback map of well-known large caps is used then — and every submissions response is checked to actually list the requested ticker, so a wrong map entry can never silently return another company's filings. |
 | `insider` | Implemented | `insiderTransactions` module, max 25 rows, same buy/grant/sell classification. |
-| `holders` | Partial | Yahoo no longer returns the named institutional-holders table via quoteSummary (the `institutionalHoldings` module is dropped from responses in 2026). Returns aggregate rows only (`institutions`, `institutionsFloat`, `insiders`, `institutionsCount`) under the original headers. Named holders are NOT faked. |
+| `holders` | Partial | Yahoo no longer returns the named institutional-holders table via quoteSummary (the `institutionalHoldings` module is dropped from responses in 2026). Returns aggregate rows only (`institutions 66.3`, `institutionsFloat 67.5`, `insiders 1.6`, `institutionsCount 7707`) under the original headers. Python returns 10 named holders (e.g. `Blackrock Inc. 8.0, 1.16B, 404.4B, 1.6`) from its HTML scrape of the Yahoo holders page. Named holders are NOT faked. |
 | `anal` | Implemented | `recommendationTrend` rows, same columns. |
-| `health` | Partial | Revenue/employee, net income/employee, revenue + earnings 3y CAGRs, net-debt/EBITDA, and warning flags are computed. Z-Score, cash-conversion cycle, and earnings-quality metrics need a populated balance sheet / cashflow statement, which 2026 quoteSummary data does not provide — those keys are omitted rather than invented. |
+| `health` | Partial | Revenue/employee, net income/employee, revenue + earnings 3y CAGRs, net-debt/EBITDA computed (all value-identical to Python). Z-Score, cash-conversion cycle, and earnings-quality metrics need a populated balance sheet / cashflow statement, which 2026 quoteSummary data does not provide — those keys are omitted rather than invented (Python: AAPL `z 12.93, ccc -71.1, oq 1.0`). |
 
 Differences from the original worth knowing:
 
@@ -123,6 +123,10 @@ Differences from the original worth knowing:
   while `q`/`h`/`div` (chart endpoint) keep working.
 - **No pandas, no yfinance.** All parsing is `serde_json` + the CSV writer
   in `src/lib.rs`.
+- **CSV bytes match Python.** The CSV writer emits `\r\n` line endings
+  and Python-style floats (`346.0`, not `346.00`), because Python's
+  `csv.writer` defaults to `\r\n` — verified byte-identical for `h`,
+  `div`, `insider`, `anal`, and `cmp` in DEEP_TEST.md.
 
 ## Development
 
